@@ -1,0 +1,41 @@
+{
+  "name": "elx_token",
+  "version": "1.0.0",
+  "description": "ELX Token for BNB chain",
+  "main": "index.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy": "hardhat run scripts/deploy.js",
+    "deploy:localhost": "hardhat run scripts/deploy.js --network localhost",
+    "execute": "hardhat run scripts/execute.js",
+    "execute:localhost": "hardhat run scripts/execute.js --network localhost",
+    "node": "hardhat node",
+    "clean": "hardhat clean",
+    "typechain": "typechain --target ethers-v6 --out-dir typechain-types 'artifacts/contracts/**/*.json'",
+    "gas-report": "REPORT_GAS=true hardhat test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/UsmanK7867/elx_token.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/UsmanK7867/elx_token/issues"
+  },
+  "homepage": "https://github.com/UsmanK7867/elx_token#readme",
+  "devDependencies": {
+    "hardhat": "^2.19.0",
+    "ethers": "^5.7.2",
+    "@nomiclabs/hardhat-ethers": "^2.2.3",
+    "@nomicfoundation/hardhat-verify": "^2.0.0",
+    "chai": "^4.3.7"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^4.9.3",
+    "dotenv": "^16.3.1"
+  }
+}
