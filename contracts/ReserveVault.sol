@@ -10,9 +10,14 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 contract ReserveVault is Ownable {
     uint256 public totalBNBReceived; // cumulative BNB received
     uint256 public totalBNBDistributed; // cumulative BNB distributed
+    address public elxToken;
 
     event BNBReceived(uint256 amount);
     event BNBWithdrawn(address indexed to, uint256 amount);
+
+    constructor(address _elxToken) {
+        elxToken = _elxToken;
+    }
 
     receive() external payable {
         totalBNBReceived += msg.value;

@@ -1,53 +1,53 @@
-const hre = require("hardhat");
 const { ethers } = require("hardhat");
 
 async function main() {
-    console.log("ELX DEPLOYMENT SCRIPT");
+  // Let's get our accounts first
+  const [deployer, devWallet] = await ethers.getSigners();
+  console.log("Starting deployment using account:", deployer.address);
+  console.log("Dev wallet is set to:", devWallet.address);
 
-    const [deployer, devWallet] = await ethers.getSigners();
-    console.log("Deployer:", deployer.address);
-    console.log("Dev Wallet:", devWallet.address, "\n");
+  // First, we'll deploy the main ELX Token contract
+  // We're passing the Zero address for the router in the constructor for now
+  console.log("\nDeploying the ELX Token...");
+  const ELXToken = await ethers.getContractFactory("ELXToken");
+  const elx = await ELXToken.deploy(
+    "ELX Token",
+    "ELX",
+    ethers.constants.AddressZero, // Router address set to 0
+    devWallet.address
+  );
+  await elx.deployed();
+  console.log("✓ ELX Token is live at:", elx.address);
 
-    
-    // STEP 1: Deploy empty mock ReserveVault and RewardsVault 
-    console.log("STEP 1: Deploying ReserveVault and RewardsVault...");
-    const ReserveVault = await ethers.getContractFactory("ReserveVault");
-    const reserveVault = await ReserveVault.deploy();
-    await reserveVault.deployed();
-    console.log("✓ ReserveVault deployed at:", reserveVault.address);
+  // Now we deploy the Reserve Vault, which needs the token address
+  console.log("Deploying the Reserve Vault...");
+  const ReserveVault = await ethers.getContractFactory("ReserveVault");
+  const reserve = await ReserveVault.deploy(elx.address);
+  await reserve.deployed();
+  console.log("✓ Reserve Vault is live at:", reserve.address);
 
-    const RewardsVault = await ethers.getContractFactory("RewardsVault");
-    const rewardsVault = await RewardsVault.deploy();
-    await rewardsVault.deployed();
-    console.log("✓ RewardsVault deployed at:", rewardsVault.address, "\n");
+  // Next is the Rewards Vault, also needing the token address
+  console.log("Deploying the Rewards Vault...");
+  const RewardsVault = await ethers.getContractFactory("RewardsVault");
+  const rewards = await RewardsVault.deploy(elx.address);
+  await rewards.deployed();
+  console.log("✓ Rewards Vault is live at:", rewards.address);
 
-    //  STEP 2: Deploy ELXToken 
-    console.log("STEP 2: Deploying ELXToken (1B supply)...");
-    const ELXToken = await ethers.getContractFactory("ELXToken");
-    // New constructor: (name, symbol, routerAddress, devWallet, reserveVault, rewardsVault)
-    const elxToken = await ELXToken.deploy(
-        "ELX Token",
-        "ELX",
-        ethers.constants.AddressZero, // No router for now
-        devWallet.address,
-        reserveVault.address,
-        rewardsVault.address
-    );
-    await elxToken.deployed();
-    console.log("✓ ELXToken deployed at:", elxToken.address, "\n");
+  // Finally, we need to link the vaults back to the token so the taxes go to the right place
+  console.log("Connecting the vaults to the token...");
+  const tx = await elx.setVaults(reserve.address, rewards.address);
+  await tx.wait();
+  console.log("✓ Vaults successfully linked to ELX Token.");
 
-    // ====== Display Initial Balances ======
-    console.log("INITIAL BALANCES");
-    let deployerBalance = await deployer.getBalance();
-   
-    console.log("Deployer BNB:", ethers.utils.formatEther(deployerBalance));
-   
-    let deployerTokenBalance = await elxToken.balanceOf(deployer.address);
-    console.log("Deployer ELXToken:", ethers.utils.formatEther(deployerTokenBalance), "\n");
-
+  console.log("\nAll done! Your contracts are deployed and connected.");
 }
 
 main().catch((error) => {
-    console.error("ERROR:", error);
-    process.exitCode = 1;
+  console.error("Oops! Something went wrong during deployment:", error);
+  process.exitCode = 1;
 });
+
+
+
+
+
