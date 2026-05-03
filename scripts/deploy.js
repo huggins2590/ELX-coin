@@ -22,7 +22,7 @@ async function main() {
   // Now we deploy the Reserve Vault, which needs the token address
   console.log("Deploying the Reserve Vault...");
   const ReserveVault = await ethers.getContractFactory("ReserveVault");
-  const reserve = await ReserveVault.deploy(elx.address);
+  const reserve = await ReserveVault.deploy(elx.address,ethers.constants.AddressZero);
   await reserve.deployed();
   console.log("✓ Reserve Vault is live at:", reserve.address);
 
