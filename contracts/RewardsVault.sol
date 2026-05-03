@@ -71,7 +71,7 @@ contract RewardsVault {
     // Manually sync stats if tokens were sent directly
     function syncTokens() external {
         uint256 balance = currentBalance();
-        if (balance > totalTokensReceived - totalTokensDistributed) {
+        if (balance + totalTokensDistributed > totalTokensReceived) {
             totalTokensReceived = balance + totalTokensDistributed;
             emit TokensReceived(balance);
         }

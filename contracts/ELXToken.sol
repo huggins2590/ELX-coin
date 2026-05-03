@@ -33,6 +33,11 @@ interface IPancakeSwapV2Factory {
     function getPair(address tokenA, address tokenB) external view returns (address pair);
 }
 
+interface IReserveVault {
+    function shouldExecuteBuyback() external view returns (bool);
+    function executeBuyback() external;
+}
+
 // ELX Token: A deflationary token with automated tax distribution, buybacks, and rewards
 contract ELXToken is ERC20, Ownable, ReentrancyGuard {
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000 * 10 ** 18;
@@ -55,6 +60,7 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
     address public devWallet;
     address public reserveVault;
     address public rewardsVault;
+    address public constant BURN_ADDRESS = address(0x000000000000000000000000000000000000dEaD);
 
     uint256 public tokensForTax;
     uint256 public swapTokensAtAmount = 1_000 * 10 ** 18;
@@ -72,7 +78,6 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
     uint256 public totalBNBToBuyback;
     uint256 public pendingBuybackBNB;
     address public lpTokenRecipient;
-    address public constant BURN_ADDRESS = address(0x000000000000000000000000000000000000dEaD);
 
     // Track status of internal functions
     bool public lastRewardsFailed;
@@ -83,6 +88,19 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
     mapping(address => uint256) public holderSince;
     uint256 public rewardThreshold = 50000 * 10**18;
     uint256 public eligibleHoldersCount;
+
+    // Reserve buyback flag system (Either-Or priority)
+    bool public buybackPending;
+
+    // Sell volume tracking: 12 buckets x 5 minutes = 60-minute window
+    uint256[12] public sellBuckets;
+    uint256 public currentBucketIndex;
+    uint256 public currentBucketStart;
+    uint256 public constant BUCKET_DURATION = 5 minutes;
+    uint256 public constant NUM_BUCKETS = 12;
+
+    // Sell pressure threshold: 50 bps = 0.5% of circulating supply
+    uint256 public sellPressureThresholdBps = 50;
 
     event BuybackBurn(uint256 bnbSpent, uint256 tokensBurned);
     event LiquidityAdded(uint256 tokenAmount, uint256 bnbAmount, uint256 liquidity);
@@ -97,7 +115,9 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
     event TaxDistributed(uint256 devTokens, uint256 bnbToReserve, uint256 bnbToBuyback);
     event ReserveTransferFailed(uint256 amount);
     event RewardsTransferFailed(uint256 amount);
-    event PendingBuybackUpdated(uint256 amount);
+    event SellVolumeUpdated(uint256 totalVolume, uint256 threshold);
+    event ReserveBuybackDeferred(uint256 timestamp);
+    event ReserveBuybackTriggered(uint256 timestamp);
 
     modifier lockTheSwap() {
         swapping = true;
@@ -111,6 +131,7 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
 
         devWallet = _devWallet == address(0) ? msg.sender : _devWallet;
         pancakeRouter = IUniswapV2Router02(routerAddress);
+        WBNB = pancakeRouter.WETH();
 
         lpTokenRecipient = BURN_ADDRESS;
         _isExcludedFromFees[msg.sender] = true;
@@ -158,17 +179,42 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
             emit TaxTaken(from, to, taxAmount);
         }
 
+        // Record sell volume for reserve buyback tracking
+        if (to == pancakePair && pancakePair != address(0)) {
+            _recordSellVolume(amount);
+        }
+
+        // Either-Or Priority Logic: Handle "Pancake: LOCKED" by deferring buybacks during trades
+        if (!swapping) {
+            bool isPairTrade = pancakePair != address(0) && (to == pancakePair || from == pancakePair);
+            bool taxSwapReady = isPairTrade && tokensForTax >= swapTokensAtAmount;
+            bool buybackTriggered = isPairTrade && _isReserveBuybackReady();
+            
+            bool buybackReady = buybackPending || buybackTriggered;
+
+            if (taxSwapReady) {
+                _processTaxSwap(tokensForTax);
+                if (buybackReady && !buybackPending) {
+                    buybackPending = true;
+                    emit ReserveBuybackDeferred(block.timestamp);
+                }
+            } else if (buybackReady && reserveVault != address(0)) {
+                if (isPairTrade) {
+                    if (!buybackPending) {
+                        buybackPending = true;
+                        emit ReserveBuybackDeferred(block.timestamp);
+                    }
+                } else {
+                    buybackPending = false;
+                    _executeReserveBuyback();
+                }
+            }
+        }
+
         super._transfer(from, to, amount - taxAmount);
 
         _updateHolderTimer(from);
         _updateHolderTimer(to);
-
-        // Check if we should swap collected taxes for BNB
-        if (!swapping && tokensForTax >= swapTokensAtAmount) {
-            if (pancakePair != address(0) && (to == pancakePair || from == pancakePair) && _msgSender() != address(pancakeRouter)) {
-                _processTaxSwap(tokensForTax);
-            }
-        }
     }
 
     function _processTaxSwap(uint256 amountToSwap) internal lockTheSwap {
@@ -239,7 +285,9 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
         }
 
         // Split BNB between Reserve and Buyback Engine
+        // We use tokensToSwap as the base because that's what generated the bnbReceived
         uint256 bnbToReserve = (tokensToSwap == 0) ? 0 : (bnbReceived * tokensForReserve) / tokensToSwap;
+        if (bnbToReserve > bnbReceived) bnbToReserve = bnbReceived;
         uint256 bnbToBuyback = bnbReceived - bnbToReserve;
 
         if (bnbToReserve > 0 && reserveVault != address(0)) {
@@ -252,33 +300,41 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
             pendingBuybackBNB = 0;
             totalBNBToBuyback += effectiveBuyback;
 
+            // Step A: Add liquidity first (uses a portion of BNB and the reserved ELX tokens)
             uint256 bnbForLiquidity = (effectiveBuyback * BUYBACK_LIQUIDITY_BPS) / 1000;
-            uint256 bnbForBurn = effectiveBuyback - bnbForLiquidity;
-
-            // Buy tokens and send to dead address
-            if (bnbForBurn > 0) {
-                address[] memory buyPath = new address[](2);
-                buyPath[0] = WBNB; buyPath[1] = address(this);
-                try pancakeRouter.swapExactETHForTokensSupportingFeeOnTransferTokens{ value: bnbForBurn }(0, buyPath, BURN_ADDRESS, block.timestamp) {
-                    lastBuybackFailed = false;
-                } catch {
-                    lastBuybackFailed = true;
-                    emit BuybackFailed(bnbForBurn);
-                }
-            }
-
-            // Add liquidity to PancakeSwap
             if (bnbForLiquidity > 0 && tokensForLP_half > 0) {
                 _approve(address(this), address(pancakeRouter), tokensForLP_half);
-                try pancakeRouter.addLiquidityETH{ value: bnbForLiquidity }(address(this), tokensForLP_half, 0, 0, lpTokenRecipient, block.timestamp) returns (uint amountToken, uint amountETH, uint liquidity) {
-                    emit LiquidityAdded(amountToken, amountETH, liquidity);
+                try pancakeRouter.addLiquidityETH{ value: bnbForLiquidity }(
+                    address(this), 
+                    tokensForLP_half, 
+                    0, 0, 
+                    lpTokenRecipient, 
+                    block.timestamp
+                ) returns (uint amountToken, uint amountETH, uint) {
+                    emit LiquidityAdded(amountToken, amountETH, 0);
                     lastLiquidityFailed = false;
                 } catch {
                     lastLiquidityFailed = true;
-                    emit LiquidityFailed(bnbForLiquidity);
                 }
-            } else if (bnbForLiquidity > 0) {
-                pendingBuybackBNB += bnbForLiquidity;
+            }
+
+            // Step B: Use ALL remaining BNB for Buyback & Burn (minimizes BNB dust)
+            uint256 bnbRemaining = address(this).balance - initialBalance;
+            if (bnbRemaining > 0) {
+                address[] memory buyPath = new address[](2);
+                buyPath[0] = WBNB; buyPath[1] = address(this);
+                try pancakeRouter.swapExactETHForTokensSupportingFeeOnTransferTokens{ value: bnbRemaining }(
+                    0, 
+                    buyPath, 
+                    BURN_ADDRESS, 
+                    block.timestamp
+                ) {
+                    lastBuybackFailed = false;
+                } catch {
+                    lastBuybackFailed = true;
+                    pendingBuybackBNB = bnbRemaining; // Only save if swap fails
+                    emit BuybackFailed(bnbRemaining);
+                }
             }
 
             // Capture any dust BNB
@@ -286,10 +342,10 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
                 pendingBuybackBNB += address(this).balance;
             }
 
-            // Re-add any leftover tokens to the tax pool
+            // Burn any leftover tokens to ensure zero dust
             uint256 leftoverTokens = balanceOf(address(this));
             if (leftoverTokens > 0) {
-                tokensForTax += leftoverTokens;
+                super._transfer(address(this), BURN_ADDRESS, leftoverTokens);
             }
         }
 
@@ -319,6 +375,75 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
 
     function burn(uint256 amount) external { _burn(msg.sender, amount); }
     function burnFrom(address account, uint256 amount) external { _approve(account, msg.sender, allowance(account, msg.sender) - amount); _burn(account, amount); }
+
+    // Sell volume tracking: gas-efficient 5-minute bucket system
+    function _recordSellVolume(uint256 amount) internal {
+        // Initialize bucket start on first call
+        if (currentBucketStart == 0) {
+            currentBucketStart = block.timestamp;
+        }
+
+        // Check if we need to rotate to next bucket(s)
+        uint256 elapsed = block.timestamp - currentBucketStart;
+        if (elapsed >= BUCKET_DURATION) {
+            uint256 bucketsToAdvance = elapsed / BUCKET_DURATION;
+            if (bucketsToAdvance >= NUM_BUCKETS) {
+                // More than 60 minutes passed — wipe everything
+                for (uint256 i = 0; i < NUM_BUCKETS; i++) {
+                    sellBuckets[i] = 0;
+                }
+                currentBucketIndex = 0;
+            } else {
+                // Clear the buckets we're advancing through
+                for (uint256 i = 0; i < bucketsToAdvance; i++) {
+                    currentBucketIndex = (currentBucketIndex + 1) % NUM_BUCKETS;
+                    sellBuckets[currentBucketIndex] = 0;
+                }
+            }
+            currentBucketStart = block.timestamp;
+        }
+
+        // Record this sell in the current bucket
+        sellBuckets[currentBucketIndex] += amount;
+    }
+
+    // Get total sell volume across all 12 buckets (last ~60 minutes)
+    function getSellVolumeLastHour() external view returns (uint256) {
+        uint256 total = 0;
+        for (uint256 i = 0; i < NUM_BUCKETS; i++) {
+            total += sellBuckets[i];
+        }
+        return total;
+    }
+
+    // Check if reserve buyback conditions are met
+    function _isReserveBuybackReady() internal view returns (bool) {
+        if (reserveVault == address(0)) return false;
+        try IReserveVault(reserveVault).shouldExecuteBuyback() returns (bool ready) {
+            return ready;
+        } catch {
+            return false;
+        }
+    }
+
+    // Execute the reserve buyback via the vault
+    function _executeReserveBuyback() internal lockTheSwap {
+        try IReserveVault(reserveVault).executeBuyback() {
+            emit ReserveBuybackTriggered(block.timestamp);
+        } catch {
+            // Safety: Buyback failure should not block user transfers
+        }
+    }
+
+    // Owner can adjust sell pressure threshold
+    function setSellPressureThreshold(uint256 _bps) external onlyOwner {
+        require(_bps > 0 && _bps <= 1000, "1-1000 bps");
+        sellPressureThresholdBps = _bps;
+    }
+
+    function setSwapTokensAtAmount(uint256 amount) external onlyOwner {
+        swapTokensAtAmount = amount;
+    }
 
     function setVaults(address _reserveVault, address _rewardsVault) external onlyOwner {
         require(reserveVault == address(0) && rewardsVault == address(0), "Vaults already set");

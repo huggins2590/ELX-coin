@@ -18,6 +18,7 @@ interface IELXTokenForReserve {
     function getSellVolumeLastHour() external view returns (uint256);
     function totalSupply() external view returns (uint256);
     function sellPressureThresholdBps() external view returns (uint256);
+    function WBNB() external view returns (address);
 }
 
 contract ReserveVault {
@@ -57,6 +58,7 @@ contract ReserveVault {
     constructor(address _elxToken, address _routerAddress) {
         elxToken = _elxToken;
         pancakeRouter = IUniswapV2Router02(_routerAddress);
+        WBNB = IELXTokenForReserve(_elxToken).WBNB();
         dayStartTime = block.timestamp;
     }
 
