@@ -2,8 +2,8 @@
 pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+
 
 interface IPancakePair {
     function getReserves() external view returns (uint112, uint112, uint32);
@@ -31,6 +31,7 @@ interface IUniswapV2Router02 {
 
 interface IPancakeSwapV2Factory {
     function getPair(address tokenA, address tokenB) external view returns (address pair);
+    function createPair(address tokenA, address tokenB) external returns (address pair);
 }
 
 interface IReserveVault {
@@ -39,45 +40,45 @@ interface IReserveVault {
 }
 
 // ELX Token: A deflationary token with automated tax distribution, buybacks, and rewards
-contract ELXToken is ERC20, Ownable, ReentrancyGuard {
+contract ELXToken is ERC20, ReentrancyGuard {
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000 * 10 ** 18;
     uint256 public constant BURN_AMOUNT = 400_000_000 * 10 ** 18;
     uint256 public constant LP_AMOUNT = 600_000_000 * 10 ** 18;
 
-    uint256 public buyTaxPercent = 5;
-    uint256 public sellTaxPercent = 5;
+    uint256 public constant buyTaxPercent = 5;
+    uint256 public constant sellTaxPercent = 5;
 
-    // Percentages for tax distribution
-    uint256 public constant DEV_TAX_BPS = 30; // 0.3%
-    uint256 public constant RESERVE_TAX_BPS = 30; // 0.3%
-    uint256 public constant BUYBACK_TAX_BPS = 440; // 4.4%
+    // Basis Points (BPS) Math: 10,000 BPS = 100% | 100 BPS = 1%
+    // Layer 1: How the total 5% tax is split (Sum = 500 BPS / 5.0%)
+    uint256 public constant TAX_SHARE_DEV_BPS = 30;      // 0.3% of total transaction
+    uint256 public constant TAX_SHARE_RESERVE_BPS = 30;  // 0.3% of total transaction
+    uint256 public constant TAX_SHARE_BUYBACK_BPS = 440; // 4.4% of total transaction
 
-    // Breakdown of the buyback portion
-    uint256 public constant BUYBACK_LIQUIDITY_BPS = 450; 
-    uint256 public constant BUYBACK_BURN_BPS = 485; 
-    uint256 public constant BUYBACK_REWARDS_BPS = 65; 
+    // Layer 2: How the 4.4% Buyback portion is distributed (Sum = 10,000 BPS / 100% of the portion)
+    uint256 public constant DISTRIBUTION_LIQUIDITY_BPS = 4500; // 45.0% of the buyback portion
+    uint256 public constant DISTRIBUTION_BURN_BPS = 4850;      // 48.5% of the buyback portion
+    uint256 public constant DISTRIBUTION_REWARDS_BPS = 650;    // 6.5% of the buyback portion
 
-    address public devWallet;
+    address public immutable devWallet;
     address public reserveVault;
     address public rewardsVault;
     address public constant BURN_ADDRESS = address(0x000000000000000000000000000000000000dEaD);
 
     uint256 public tokensForTax;
-    uint256 public swapTokensAtAmount = 1_000 * 10 ** 18;
+    uint256 public constant SWAP_TOKENS_AT_AMOUNT = 10_000 * 10 ** 18;
 
     address public pancakePair;
-    IUniswapV2Router02 public pancakeRouter;
-    address public WBNB;
-
-    uint16 public slippageBps = 500; 
+    IUniswapV2Router02 public immutable pancakeRouter;
+    address public immutable WBNB;
+    uint16 public constant slippageBps = 1000; 
 
     bool private swapping;
-    mapping(address => bool) private _isExcludedFromFees;
+    address public immutable vaultSetter;
+    mapping(address => bool) public _isExcludedFromFees;
 
     uint256 public totalBNBToReserve;
     uint256 public totalBNBToBuyback;
     uint256 public pendingBuybackBNB;
-    address public lpTokenRecipient;
 
     // Track status of internal functions
     bool public lastRewardsFailed;
@@ -86,11 +87,8 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
 
     // Reward eligibility tracking
     mapping(address => uint256) public holderSince;
-    uint256 public rewardThreshold = 50000 * 10**18;
+    uint256 public constant REWARD_THRESHOLD = 50000 * 10**18;
     uint256 public eligibleHoldersCount;
-
-    // Reserve buyback flag system (Either-Or priority)
-    bool public buybackPending;
 
     // Sell volume tracking: 12 buckets x 5 minutes = 60-minute window
     uint256[12] public sellBuckets;
@@ -99,24 +97,17 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
     uint256 public constant BUCKET_DURATION = 5 minutes;
     uint256 public constant NUM_BUCKETS = 12;
 
-    // Sell pressure threshold: 50 bps = 0.5% of circulating supply
-    uint256 public sellPressureThresholdBps = 50;
+    uint256 public constant SELL_PRESSURE_THRESHOLD_BPS = 50;
 
     event BuybackBurn(uint256 bnbSpent, uint256 tokensBurned);
     event LiquidityAdded(uint256 tokenAmount, uint256 bnbAmount, uint256 liquidity);
-    event RewardsFailed(uint256 amount);
-    event BuybackFailed(uint256 amount);
-    event LiquidityFailed(uint256 amount);
-    event BuybackFailedDetailed(string reason);
-    event LiquidityFailedDetailed(string reason);
+
     event TaxesUpdated(uint256 buyPercent, uint256 sellPercent);
     event SwapTokensForBNB(uint256 tokenAmount, uint256 bnbReceived);
     event TaxTaken(address indexed from, address indexed to, uint256 amount);
     event TaxDistributed(uint256 devTokens, uint256 bnbToReserve, uint256 bnbToBuyback);
-    event ReserveTransferFailed(uint256 amount);
-    event RewardsTransferFailed(uint256 amount);
+
     event SellVolumeUpdated(uint256 totalVolume, uint256 threshold);
-    event ReserveBuybackDeferred(uint256 timestamp);
     event ReserveBuybackTriggered(uint256 timestamp);
 
     modifier lockTheSwap() {
@@ -125,15 +116,21 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
         swapping = false;
     }
 
-    constructor(string memory name, string memory symbol, address routerAddress, address _devWallet) ERC20(name, symbol) {
+    modifier onlyVaultSetter() {
+        require(msg.sender == vaultSetter, "Not vault setter");
+        _;
+    }
+
+    constructor(string memory _name, string memory _symbol, address routerAddress, address _devWallet) ERC20(_name, _symbol) {
         _mint(msg.sender, TOTAL_SUPPLY);
         _burn(msg.sender, BURN_AMOUNT);
 
-        devWallet = _devWallet == address(0) ? msg.sender : _devWallet;
+        vaultSetter = msg.sender;
+        devWallet = _devWallet;
         pancakeRouter = IUniswapV2Router02(routerAddress);
         WBNB = pancakeRouter.WETH();
 
-        lpTokenRecipient = BURN_ADDRESS;
+
         _isExcludedFromFees[msg.sender] = true;
         _isExcludedFromFees[address(this)] = true;
     }
@@ -148,11 +145,6 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
         if (amount == 0) { super._transfer(from, to, 0); return; }
         if (_isExcludedFromFees[from] || _isExcludedFromFees[to]) { super._transfer(from, to, amount); return; }
 
-        if (pancakePair == address(0) && address(pancakeRouter) != address(0)) {
-            try IPancakeSwapV2Factory(pancakeRouter.factory()).getPair(address(this), WBNB) returns (address pair) {
-                pancakePair = pair;
-            } catch {}
-        }
 
         uint256 taxAmount = 0;
         if (from == pancakePair && buyTaxPercent > 0) {
@@ -162,9 +154,9 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
         }
 
         if (taxAmount > 0) {
-            uint256 devAmount = (taxAmount * DEV_TAX_BPS) / 500;
-            uint256 reserveAmount = (taxAmount * RESERVE_TAX_BPS) / 500;
-            uint256 buybackAmount = (taxAmount * BUYBACK_TAX_BPS) / 500;
+            uint256 devAmount = (taxAmount * TAX_SHARE_DEV_BPS) / 500;
+            uint256 reserveAmount = (taxAmount * TAX_SHARE_RESERVE_BPS) / 500;
+            uint256 buybackAmount = (taxAmount * TAX_SHARE_BUYBACK_BPS) / 500;
 
             if (devAmount > 0 && devWallet != address(0)) {
                 super._transfer(from, devWallet, devAmount);
@@ -185,34 +177,22 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
         }
 
         // Either-Or Priority Logic: Handle "Pancake: LOCKED" by deferring buybacks during trades
-        if (!swapping) {
-            bool isPairTrade = pancakePair != address(0) && (to == pancakePair || from == pancakePair);
-            bool taxSwapReady = isPairTrade && tokensForTax >= swapTokensAtAmount;
-            bool buybackTriggered = isPairTrade && _isReserveBuybackReady();
-            
-            bool buybackReady = buybackPending || buybackTriggered;
-
-            if (taxSwapReady) {
+        // Priority Logic: Handle system actions only during SELLS to avoid Pancake: LOCKED
+        // We prioritize Reserve Buyback (Price Support) over Tax Swaps
+        if (!swapping && to == pancakePair && pancakePair != address(0)) {
+            if (_isReserveBuybackReady()) {
+                _executeReserveBuyback();
+            } else if (tokensForTax >= SWAP_TOKENS_AT_AMOUNT) {
                 _processTaxSwap(tokensForTax);
-                if (buybackReady && !buybackPending) {
-                    buybackPending = true;
-                    emit ReserveBuybackDeferred(block.timestamp);
-                }
-            } else if (buybackReady && reserveVault != address(0)) {
-                if (isPairTrade) {
-                    if (!buybackPending) {
-                        buybackPending = true;
-                        emit ReserveBuybackDeferred(block.timestamp);
-                    }
-                } else {
-                    buybackPending = false;
-                    _executeReserveBuyback();
-                }
             }
         }
 
         super._transfer(from, to, amount - taxAmount);
+    }
 
+    // Automatically manage holder timers on all transfers, mints, and burns
+    function _afterTokenTransfer(address from, address to, uint256 amount) internal override {
+        super._afterTokenTransfer(from, to, amount);
         _updateHolderTimer(from);
         _updateHolderTimer(to);
     }
@@ -247,22 +227,19 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
         uint256 initialBalance = address(this).balance;
         lastRewardsFailed = false; lastBuybackFailed = false; lastLiquidityFailed = false;
 
-        uint256 totalTaxBps = RESERVE_TAX_BPS + BUYBACK_TAX_BPS; 
+
+        uint256 totalTaxBps = TAX_SHARE_RESERVE_BPS + TAX_SHARE_BUYBACK_BPS; 
         if (totalTaxBps == 0) return false;
 
-        uint256 tokensForReserve = (tokenAmount * RESERVE_TAX_BPS) / totalTaxBps;
+        uint256 tokensForReserve = (tokenAmount * TAX_SHARE_RESERVE_BPS) / totalTaxBps;
         uint256 tokensBuyback = tokenAmount - tokensForReserve;
 
         // Keep half of LP tokens for liquidity, swap the rest
-        uint256 tokensForLP = (tokensBuyback * BUYBACK_LIQUIDITY_BPS) / 1000;
+        uint256 tokensForLP = (tokensBuyback * DISTRIBUTION_LIQUIDITY_BPS) / 10000;
         uint256 tokensForLP_half = tokensForLP / 2;           
         
-        uint256 tokensForRewards = (tokensBuyback * BUYBACK_REWARDS_BPS) / 1000;
-        if (tokensForRewards > 0 && rewardsVault != address(0)) {
-            super._transfer(address(this), rewardsVault, tokensForRewards);
-        }
-
-        uint256 tokensToSwap = tokenAmount - tokensForLP_half - tokensForRewards;
+        // Rewards will be processed from the buyback BNB instead of direct tokens
+        uint256 tokensToSwap = tokenAmount - tokensForLP_half;
 
         // Convert tokens to BNB
         bool swapSucceeded = true;
@@ -281,7 +258,7 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
         uint256 bnbReceived = address(this).balance - initialBalance;
         if (bnbReceived == 0) {
             emit SwapTokensForBNB(tokenAmount, 0);
-            return true;
+            return true; // Return true because tokens are gone from the contract even if BNB was 0
         }
 
         // Split BNB between Reserve and Buyback Engine
@@ -301,14 +278,19 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
             totalBNBToBuyback += effectiveBuyback;
 
             // Step A: Add liquidity first (uses a portion of BNB and the reserved ELX tokens)
-            uint256 bnbForLiquidity = (effectiveBuyback * BUYBACK_LIQUIDITY_BPS) / 1000;
+            uint256 bnbForLiquidity = (effectiveBuyback * DISTRIBUTION_LIQUIDITY_BPS) / 10000;
             if (bnbForLiquidity > 0 && tokensForLP_half > 0) {
                 _approve(address(this), address(pancakeRouter), tokensForLP_half);
+                
+                uint256 amountTokenMin = (tokensForLP_half * (10000 - slippageBps)) / 10000;
+                uint256 amountETHMin = (bnbForLiquidity * (10000 - slippageBps)) / 10000;
+                
                 try pancakeRouter.addLiquidityETH{ value: bnbForLiquidity }(
                     address(this), 
                     tokensForLP_half, 
-                    0, 0, 
-                    lpTokenRecipient, 
+                    amountTokenMin, 
+                    amountETHMin, 
+                    BURN_ADDRESS, 
                     block.timestamp
                 ) returns (uint amountToken, uint amountETH, uint) {
                     emit LiquidityAdded(amountToken, amountETH, 0);
@@ -318,22 +300,37 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
                 }
             }
 
-            // Step B: Use ALL remaining BNB for Buyback & Burn (minimizes BNB dust)
+            // Step B: Use ALL remaining BNB for Buyback & Distribute (minimizes BNB dust)
             uint256 bnbRemaining = address(this).balance - initialBalance;
             if (bnbRemaining > 0) {
                 address[] memory buyPath = new address[](2);
                 buyPath[0] = WBNB; buyPath[1] = address(this);
-                try pancakeRouter.swapExactETHForTokensSupportingFeeOnTransferTokens{ value: bnbRemaining }(
-                    0, 
-                    buyPath, 
-                    BURN_ADDRESS, 
-                    block.timestamp
-                ) {
-                    lastBuybackFailed = false;
-                } catch {
+                
+                uint256 totalSplitBps = DISTRIBUTION_REWARDS_BPS + DISTRIBUTION_BURN_BPS;
+                uint256 bnbForRewards = (bnbRemaining * DISTRIBUTION_REWARDS_BPS) / totalSplitBps;
+                uint256 bnbForBurn = bnbRemaining - bnbForRewards;
+
+                bool swapRewardsFailed = false;
+                bool swapBurnFailed = false;
+
+                if (bnbForRewards > 0 && rewardsVault != address(0)) {
+                    uint256 minOutRewards = _getAmountOutMin(bnbForRewards, buyPath);
+                    try pancakeRouter.swapExactETHForTokensSupportingFeeOnTransferTokens{ value: bnbForRewards }(
+                        minOutRewards, buyPath, rewardsVault, block.timestamp
+                    ) {} catch { swapRewardsFailed = true; }
+                }
+
+                if (bnbForBurn > 0) {
+                    uint256 minOutBurn = _getAmountOutMin(bnbForBurn, buyPath);
+                    try pancakeRouter.swapExactETHForTokensSupportingFeeOnTransferTokens{ value: bnbForBurn }(
+                        minOutBurn, buyPath, BURN_ADDRESS, block.timestamp
+                    ) {} catch { swapBurnFailed = true; }
+                }
+
+                if (swapRewardsFailed || swapBurnFailed) {
                     lastBuybackFailed = true;
-                    pendingBuybackBNB = bnbRemaining; // Only save if swap fails
-                    emit BuybackFailed(bnbRemaining);
+                } else {
+                    lastBuybackFailed = false;
                 }
             }
 
@@ -351,26 +348,6 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
 
         emit SwapTokensForBNB(tokenAmount, bnbReceived);
         return true;
-    }
-
-    function _getRevertMsg(bytes memory _returnData) internal pure returns (string memory) {
-        if (_returnData.length < 68) return "Transaction reverted silently";
-        bytes memory revertData = _returnData;
-        assembly { revertData := add(revertData, 0x04) }
-        return abi.decode(revertData, (string));
-    }
-
-    // Manual trigger for tax distribution (Owner only)
-    function swapCollectedTaxesNow(uint256 amount) external onlyOwner lockTheSwap nonReentrant {
-        if (amount == 0) return;
-        uint256 available = balanceOf(address(this));
-        uint256 toSwap = amount > tokensForTax ? tokensForTax : amount;
-        if (toSwap > available) toSwap = available;
-        if (toSwap == 0) return;
-        
-        if (_distributeTaxes(toSwap)) {
-            tokensForTax = tokensForTax >= toSwap ? tokensForTax - toSwap : 0;
-        }
     }
 
     function burn(uint256 amount) external { _burn(msg.sender, amount); }
@@ -435,39 +412,29 @@ contract ELXToken is ERC20, Ownable, ReentrancyGuard {
         }
     }
 
-    // Owner can adjust sell pressure threshold
-    function setSellPressureThreshold(uint256 _bps) external onlyOwner {
-        require(_bps > 0 && _bps <= 1000, "1-1000 bps");
-        sellPressureThresholdBps = _bps;
-    }
-
-    function setSwapTokensAtAmount(uint256 amount) external onlyOwner {
-        swapTokensAtAmount = amount;
-    }
-
-    function setVaults(address _reserveVault, address _rewardsVault) external onlyOwner {
+    function setVaults(address _reserveVault, address _rewardsVault, address _pancakePair) external onlyVaultSetter {
         require(reserveVault == address(0) && rewardsVault == address(0), "Vaults already set");
+        require(_reserveVault != address(0) && _rewardsVault != address(0) && _pancakePair != address(0), "Zero address");
+        
         reserveVault = _reserveVault;
         rewardsVault = _rewardsVault;
+        pancakePair = _pancakePair;
+
         _isExcludedFromFees[_reserveVault] = true;
         _isExcludedFromFees[_rewardsVault] = true;
     }
 
-    function setRewardThreshold(uint256 _threshold) external onlyOwner {
-        rewardThreshold = _threshold;
-    }
-
     function resetRewardTimer(address account) external {
         require(msg.sender == rewardsVault, "Only rewards vault");
-        holderSince[account] = balanceOf(account) >= rewardThreshold ? block.timestamp : 0;
+        holderSince[account] = balanceOf(account) >= REWARD_THRESHOLD ? block.timestamp : 0;
     }
 
     // Updates the holding timer when balances change
     function _updateHolderTimer(address account) internal {
-        if (account == address(0) || account == pancakePair || _isExcludedFromFees[account]) return;
+        if (account == address(0) || account == BURN_ADDRESS || account == pancakePair || _isExcludedFromFees[account]) return;
         
         uint256 balance = balanceOf(account);
-        if (balance >= rewardThreshold) {
+        if (balance >= REWARD_THRESHOLD) {
             if (holderSince[account] == 0) {
                 holderSince[account] = block.timestamp;
                 eligibleHoldersCount++;

@@ -17,7 +17,7 @@ interface IUniswapV2Router02 {
 interface IELXTokenForReserve {
     function getSellVolumeLastHour() external view returns (uint256);
     function totalSupply() external view returns (uint256);
-    function sellPressureThresholdBps() external view returns (uint256);
+    function SELL_PRESSURE_THRESHOLD_BPS() external view returns (uint256);
     function WBNB() external view returns (address);
 }
 
@@ -26,9 +26,9 @@ contract ReserveVault {
     uint256 public totalBNBDistributed;
     uint256 public totalBNBBuyback;
 
-    address public elxToken;
-    IUniswapV2Router02 public pancakeRouter;
-    address public WBNB;
+    address public immutable elxToken;
+    IUniswapV2Router02 public immutable pancakeRouter;
+    address public immutable WBNB;
     address public constant BURN_ADDRESS = address(0x000000000000000000000000000000000000dEaD);
     uint256 public constant MIN_RESERVE_BALANCE = 0.01 ether;
 
@@ -40,9 +40,9 @@ contract ReserveVault {
     uint256 public constant BUYBACK_COOLDOWN = 4 hours;
     uint256 public constant DAY_DURATION = 24 hours;
 
-    uint256 public executionPercent = 5;
-    uint256 public minBuybackAmount = 0.05 ether;
-    uint16 public slippageBps = 1000; // 10% slippage
+    uint256 public constant executionPercent = 5;
+    uint256 public constant minBuybackAmount = 0.05 ether;
+    uint16 public constant slippageBps = 1000; // 10% slippage
     bool private executing;
 
     event BNBReceived(uint256 amount);
@@ -56,6 +56,7 @@ contract ReserveVault {
     }
 
     constructor(address _elxToken, address _routerAddress) {
+        require(_elxToken != address(0), "Zero address");
         elxToken = _elxToken;
         pancakeRouter = IUniswapV2Router02(_routerAddress);
         WBNB = IELXTokenForReserve(_elxToken).WBNB();
@@ -90,11 +91,15 @@ contract ReserveVault {
         if (elxToken == address(0)) return false;
         try IELXTokenForReserve(elxToken).getSellVolumeLastHour() returns (uint256 sellVolume) {
             uint256 supply = IELXTokenForReserve(elxToken).totalSupply();
-            uint256 thresholdBps = IELXTokenForReserve(elxToken).sellPressureThresholdBps();
+            uint256 thresholdBps = IELXTokenForReserve(elxToken).SELL_PRESSURE_THRESHOLD_BPS();
             if (supply == 0 || thresholdBps == 0) return false;
 
             uint256 threshold = (supply * thresholdBps) / 10000;
-            return sellVolume >= threshold;
+            if (sellVolume < threshold) return false;
+
+            // Ensure we have at least the minimum amount to spend
+            available = _getAvailableBNB();
+            return available >= minBuybackAmount;
         } catch {
             return false;
         }
@@ -119,6 +124,13 @@ contract ReserveVault {
         uint256 available = _getAvailableBNB();
         uint256 spendAmount = (available * executionPercent) / 100;
         
+        // If the percentage is too low, use the minimum allowed amount if available
+        if (spendAmount < minBuybackAmount && available >= minBuybackAmount) {
+            spendAmount = minBuybackAmount;
+        }
+        
+        // Safety: Never spend the MIN_RESERVE_BALANCE
+        require(available >= spendAmount + MIN_RESERVE_BALANCE, "Insufficient reserve floor");
         require(spendAmount >= minBuybackAmount, "Min amount check failed");
 
         uint256 prevLastBuybackTime = lastBuybackTime;
@@ -155,34 +167,31 @@ contract ReserveVault {
     }
 
     function _getAvailableBNB() internal view returns (uint256) {
-        uint256 balance = address(this).balance;
-        if (balance <= MIN_RESERVE_BALANCE) return 0;
-        return balance - MIN_RESERVE_BALANCE;
-    }
-
-    // View functions
-    function currentBalance() external view returns (uint256) {
         return address(this).balance;
     }
 
-    function availableForBuyback() external view returns (uint256) {
-        return _getAvailableBNB();
-    }
-
-    function getTotals() external view returns (uint256 received, uint256 distributed, uint256 buyback) {
-        return (totalBNBReceived, totalBNBDistributed, totalBNBBuyback);
-    }
-
-    function getGuardStatus() external view returns (
-        uint256 _lastBuybackTime,
-        uint256 _buybacksToday,
-        uint256 _dayStartTime,
-        bool _canExecute
+    /**
+     * @dev Consolidated function to read all vault states in one call.
+     * Returns: balance, totalReceived, totalDistributed, lastBuybackTime, todayBuybackCount, isReady
+     */
+    function getVaultState() external view returns (
+        uint256 balance,
+        uint256 received,
+        uint256 distributed,
+        uint256 lastBuyback,
+        uint256 todayCount,
+        bool ready
     ) {
-        uint256 todayCount = buybacksToday;
-        if (block.timestamp >= dayStartTime + DAY_DURATION) {
-            todayCount = 0;
-        }
-        return (lastBuybackTime, todayCount, dayStartTime, shouldExecuteBuyback());
+        uint256 count = buybacksToday;
+        if (block.timestamp >= dayStartTime + DAY_DURATION) count = 0;
+        
+        return (
+            address(this).balance,
+            totalBNBReceived,
+            totalBNBDistributed,
+            lastBuybackTime,
+            count,
+            shouldExecuteBuyback()
+        );
     }
 }

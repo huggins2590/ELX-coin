@@ -25,6 +25,10 @@ module.exports = {
   networks: {
     hardhat: {
       chainId: 56,
+      forking: {
+        url: "https://bnb-mainnet.g.alchemy.com/v2/-vZfyfKHGZLn5DuF_Uqu4",
+        enabled: process.env.FORK === "true"
+      }
     },
     localhost: {
       url: "http://127.0.0.1:8545",

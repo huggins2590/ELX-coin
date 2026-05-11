@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface IELXToken is IERC20 {
     function holderSince(address account) external view returns (uint256);
@@ -11,28 +11,29 @@ interface IELXToken is IERC20 {
 
 // Vault for holding and distributing ELX rewards to eligible holders
 contract RewardsVault {
-    uint256 public totalTokensReceived; 
+    using SafeERC20 for IERC20;
+    using SafeERC20 for IELXToken;
+    
     uint256 public totalTokensDistributed; 
     mapping(address => uint256) public userTotalClaimed; 
 
-    IELXToken public elxToken;
+    IELXToken public immutable elxToken;
     uint256 public constant REWARD_DURATION = 72 hours;
 
     event TokensReceived(uint256 amount);
     event RewardClaimed(address indexed user, uint256 amount);
 
     constructor(address _elxToken) {
+        require(_elxToken != address(0), "Zero address");
         elxToken = IELXToken(_elxToken);
     }
-
-    receive() external payable {}
 
     function currentBalance() public view returns (uint256) {
         return elxToken.balanceOf(address(this));
     }
 
     function getTotals() external view returns (uint256 received, uint256 distributed) {
-        return (totalTokensReceived, totalTokensDistributed);
+        return (totalTokensReceived(), totalTokensDistributed);
     }
 
     // Work out how many tokens a user can claim right now
@@ -45,8 +46,6 @@ contract RewardsVault {
         uint256 since = elxToken.holderSince(user);
         if (since == 0) return 0;
         if (block.timestamp < since + REWARD_DURATION) return 0;
-
-        // Everyone gets an equal share of the current vault balance
         return currentBalance() / totalEligible;
     }
 
@@ -63,17 +62,13 @@ contract RewardsVault {
         totalTokensDistributed += reward;
         userTotalClaimed[msg.sender] += reward;
         
-        require(elxToken.transfer(msg.sender, reward), "Token transfer failed");
+        elxToken.safeTransfer(msg.sender, reward);
 
         emit RewardClaimed(msg.sender, reward);
     }
 
-    // Manually sync stats if tokens were sent directly
-    function syncTokens() external {
-        uint256 balance = currentBalance();
-        if (balance + totalTokensDistributed > totalTokensReceived) {
-            totalTokensReceived = balance + totalTokensDistributed;
-            emit TokensReceived(balance);
-        }
+    // Automated view of total tokens ever sent to this vault
+    function totalTokensReceived() public view returns (uint256) {
+        return currentBalance() + totalTokensDistributed;
     }
 }

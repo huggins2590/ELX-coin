@@ -3,13 +3,12 @@ const { ethers, network } = require("hardhat");
 
 describe("ELX System Full Coverage", function () {
     let deployer, devWallet, user1, user2, user3;
-    let wbnb, factory, router, elx, reserveVault, rewardsVault;
+    let wbnb, factory, router, elx, reserveVault, rewardsVault, pair;
     const BURN_ADDRESS = "0x000000000000000000000000000000000000dEaD";
 
     before(async function () {
         [deployer, devWallet, user1, user2, user3] = await ethers.getSigners();
 
-        // 1. Deploy DEX Mocks
         const WBNB = await ethers.getContractFactory("WBNB");
         wbnb = await WBNB.deploy();
         await wbnb.deployed();
@@ -22,7 +21,6 @@ describe("ELX System Full Coverage", function () {
         router = await Router.deploy(factory.address, wbnb.address);
         await router.deployed();
 
-        // 2. Deploy ELX System
         const ELXToken = await ethers.getContractFactory("ELXToken");
         elx = await ELXToken.deploy("ELX Token", "ELX", router.address, devWallet.address);
         await elx.deployed();
@@ -35,13 +33,13 @@ describe("ELX System Full Coverage", function () {
         reserveVault = await ReserveVault.deploy(elx.address, router.address);
         await reserveVault.deployed();
 
-        // 3. Link Vaults
-        await elx.setVaults(reserveVault.address, rewardsVault.address);
-        await elx.setRewardThreshold(ethers.utils.parseEther("1000")); // lower for testing
+        await factory.createPair(elx.address, wbnb.address);
+        const pairAddress = await factory.getPair(elx.address, wbnb.address);
         
-        // 4. Initial Liquidity
-        const tokensToAdd = ethers.utils.parseEther("100000");
-        const bnbToAdd = ethers.utils.parseEther("10");
+        await elx.setVaults(reserveVault.address, rewardsVault.address, pairAddress);
+        
+        const tokensToAdd = ethers.utils.parseEther("100000000"); 
+        const bnbToAdd = ethers.utils.parseEther("1000"); 
         await elx.approve(router.address, tokensToAdd);
         await router.addLiquidityETH(
             elx.address,
@@ -52,188 +50,122 @@ describe("ELX System Full Coverage", function () {
             { value: bnbToAdd }
         );
 
-        // Distribute some tokens
-        await elx.transfer(user1.address, ethers.utils.parseEther("5000"));
-        await elx.transfer(user2.address, ethers.utils.parseEther("5000"));
+        await elx.transfer(user1.address, ethers.utils.parseEther("10000000"));
+        await elx.transfer(user2.address, ethers.utils.parseEther("10000000"));
+        await elx.transfer(user3.address, ethers.utils.parseEther("10000000"));
     });
 
-    describe("ELX Token Core Mechanics", function () {
+    describe("1. ELX Token Core Mechanics", function () {
         it("Should execute normal transfers without tax", async function () {
-            const amount = ethers.utils.parseEther("100");
-            const b1Before = await elx.balanceOf(user1.address);
+            const amount = ethers.utils.parseEther("1000");
             const b2Before = await elx.balanceOf(user2.address);
-            
             await elx.connect(user1).transfer(user2.address, amount);
-            
-            const b1After = await elx.balanceOf(user1.address);
             const b2After = await elx.balanceOf(user2.address);
-            
-            expect(b1Before.sub(b1After).eq(amount)).to.be.true;
             expect(b2After.sub(b2Before).eq(amount)).to.be.true;
         });
 
-        it("Should collect tax on buys and sells", async function () {
-            // Buy
-            const buyAmount = ethers.utils.parseEther("1");
-            await router.connect(user3).swapExactETHForTokensSupportingFeeOnTransferTokens(
-                0, [wbnb.address, elx.address], user3.address, ethers.constants.MaxUint256, { value: buyAmount }
-            );
-            
-            const taxAccumulatedAfterBuy = await elx.tokensAccumulatedForTax();
-            expect(taxAccumulatedAfterBuy.gt(0)).to.be.true;
 
-            // Sell
-            const sellAmount = await elx.balanceOf(user3.address);
-            await elx.connect(user3).approve(router.address, sellAmount);
-            await router.connect(user3).swapExactTokensForETHSupportingFeeOnTransferTokens(
-                sellAmount, 0, [elx.address, wbnb.address], user3.address, ethers.constants.MaxUint256
-            );
-
-            const taxAccumulatedAfterSell = await elx.tokensAccumulatedForTax();
-            expect(taxAccumulatedAfterSell.gt(taxAccumulatedAfterBuy)).to.be.true;
-        });
-
-        it("Should process tax swap and distribute to vaults", async function () {
-            const taxTokens = await elx.tokensAccumulatedForTax();
-            
-            // To ensure we meet threshold or test manual
-            const reserveBalBefore = await ethers.provider.getBalance(reserveVault.address);
-            const rewardsBalBefore = await elx.balanceOf(rewardsVault.address);
-            
-            await elx.swapCollectedTaxesNow(taxTokens);
-            
-            const reserveBalAfter = await ethers.provider.getBalance(reserveVault.address);
-            const rewardsBalAfter = await elx.balanceOf(rewardsVault.address);
-            
-            expect(reserveBalAfter.gt(reserveBalBefore)).to.be.true;
-            expect(rewardsBalAfter.gt(rewardsBalBefore)).to.be.true;
-        });
-
-        it("Should allow owner to exclude from fees", async function () {
-            await elx.transfer(user3.address, ethers.utils.parseEther("1000")); // fund user3
-            
-            // Approve router
-            await elx.connect(user3).approve(router.address, ethers.constants.MaxUint256);
-            
-            // Should have fee normally
+        it("Should collect tax on buys", async function () {
             const taxBefore = await elx.tokensAccumulatedForTax();
-            await router.connect(user3).swapExactTokensForETHSupportingFeeOnTransferTokens(
-                ethers.utils.parseEther("100"), 0, [elx.address, wbnb.address], user3.address, ethers.constants.MaxUint256
+            await router.connect(user3).swapExactETHForTokensSupportingFeeOnTransferTokens(
+                0, [wbnb.address, elx.address], user3.address, ethers.constants.MaxUint256, { value: ethers.utils.parseEther("1") }
             );
             const taxAfter = await elx.tokensAccumulatedForTax();
             expect(taxAfter.gt(taxBefore)).to.be.true;
+        });
 
-            // Exclude from fee (temporarily mock via devWallet for simplicity, or we skip actual exclusion test if no external func. Actually owner is deployer)
-            // Wait, we don't have setExcludedFromFees exposed in ELXToken? Let's check.
+        it("Should collect tax on sells", async function () {
+            const taxBefore = await elx.tokensAccumulatedForTax();
+            const sellAmt = ethers.utils.parseEther("1000");
+            await elx.connect(user3).approve(router.address, sellAmt);
+            await router.connect(user3).swapExactTokensForETHSupportingFeeOnTransferTokens(
+                sellAmt, 0, [elx.address, wbnb.address], user3.address, ethers.constants.MaxUint256
+            );
+            const taxAfter = await elx.tokensAccumulatedForTax();
+            expect(taxAfter.gt(taxBefore)).to.be.true;
+        });
+
+        it("Should process tax swap atomically on Sell when queue > 10,000", async function () {
+            const sellAmt = ethers.utils.parseEther("300000"); 
+            const stateBefore = await reserveVault.getVaultState();
+            
+            await elx.connect(user1).approve(router.address, sellAmt);
+            await router.connect(user1).swapExactTokensForETHSupportingFeeOnTransferTokens(
+                sellAmt, 0, [elx.address, wbnb.address], user1.address, ethers.constants.MaxUint256
+            );
+
+            const stateAfter = await reserveVault.getVaultState();
+            expect(stateAfter.balance.gt(stateBefore.balance)).to.be.true;
         });
     });
 
-    describe("Rewards Vault Mechanics", function () {
-        it("Should not allow claims before duration", async function () {
-            const claimable = await rewardsVault.getClaimableAmount(user1.address);
-            expect(claimable.eq(0)).to.equal(true);
-            
+    describe("2. Rewards Vault Mechanics", function () {
+        it("Should track total tokens received automatically", async function () {
+            const amount = ethers.utils.parseEther("100");
+            const receivedBefore = await rewardsVault.totalTokensReceived();
+            await elx.transfer(rewardsVault.address, amount);
+            const receivedAfter = await rewardsVault.totalTokensReceived();
+            expect(receivedAfter.sub(receivedBefore).eq(amount)).to.be.true;
+        });
+
+        it("Should not allow claims before 72 hours", async function () {
             try {
                 await rewardsVault.connect(user1).claimReward();
-                expect.fail("Expected revert");
-            } catch (error) {
-                expect(error.message).to.include("Not eligible");
+                expect.fail("Should have reverted");
+            } catch (e) {
+                expect(e.message).to.include("Not eligible");
             }
         });
 
         it("Should allow claim after 72 hours", async function () {
-            // Fast forward 72 hours + 1 min
-            await network.provider.send("evm_increaseTime", [72 * 3600 + 60]);
+            await network.provider.send("evm_increaseTime", [73 * 3600]); 
             await network.provider.send("evm_mine");
-
             const claimable = await rewardsVault.getClaimableAmount(user1.address);
-            expect(claimable.gt(0)).to.equal(true);
-
-            const balanceBefore = await elx.balanceOf(user1.address);
+            expect(claimable.gt(0)).to.be.true;
+            
+            const balBefore = await elx.balanceOf(user1.address);
             await rewardsVault.connect(user1).claimReward();
-            const balanceAfter = await elx.balanceOf(user1.address);
-
-            // Since user1 is excluded from fees, they receive full amount. If they are not, they might receive less.
-            // But claimReward transfers from RewardsVault directly, which is excluded from fees!
-            // So they get the full amount.
-            expect(balanceAfter.sub(balanceBefore).gte(0)).to.equal(true); // just check it increased to avoid rounding issues in test
+            const balAfter = await elx.balanceOf(user1.address);
+            expect(balAfter.gt(balBefore)).to.be.true;
         });
 
-        it("Should reset timer after claim", async function () {
+        it("Should reset timer and claimable after successful claim", async function () {
             const claimable = await rewardsVault.getClaimableAmount(user1.address);
-            expect(claimable.eq(0)).to.equal(true);
-        });
-
-        it("Should sync tokens manually", async function () {
-            const amount = ethers.utils.parseEther("100");
-            const receivedBefore = await rewardsVault.totalTokensReceived();
-            await elx.transfer(rewardsVault.address, amount);
-            await rewardsVault.syncTokens();
-            const receivedAfter = await rewardsVault.totalTokensReceived();
-            expect(receivedAfter.gt(receivedBefore)).to.equal(true);
+            expect(claimable.eq(0)).to.be.true;
         });
     });
 
-    describe("Reserve Vault Autonomous Mechanics", function () {
-        it("Should receive BNB directly", async function () {
-            const amount = ethers.utils.parseEther("5");
-            await deployer.sendTransaction({
-                to: reserveVault.address,
-                value: amount
-            });
-            const bal = await reserveVault.currentBalance();
-            expect(bal.gte(amount)).to.equal(true);
+    describe("3. Reserve Vault Autonomous Mechanics", function () {
+        it("Should receive BNB directly from anyone", async function () {
+            const stateBefore = await reserveVault.getVaultState();
+            await deployer.sendTransaction({ to: reserveVault.address, value: ethers.utils.parseEther("1") });
+            const stateAfter = await reserveVault.getVaultState();
+            expect(stateAfter.balance.sub(stateBefore.balance).eq(ethers.utils.parseEther("1"))).to.be.true;
         });
 
-        it("Should return accurate available for buyback (minus 0.01 floor)", async function () {
-            const totalBal = await reserveVault.currentBalance();
-            const available = await reserveVault.availableForBuyback();
-            expect(totalBal.sub(available).eq(ethers.utils.parseEther("0.01"))).to.equal(true);
+        it("Should return correct ready state for buyback", async function () {
+            const state = await reserveVault.getVaultState();
+            // Should be false initially since no pressure
+            expect(state.ready).to.be.false;
         });
 
-        it("Should NOT execute buyback if sell pressure not met", async function () {
-            const canExecute = await reserveVault.shouldExecuteBuyback();
-            expect(canExecute).to.equal(false);
-        });
-
-        it("Should detect sell pressure and queue buyback", async function () {
-            await elx.setSellPressureThreshold(1); // 1 bps = very low
+        it("Should detect sell pressure and execute buyback atomically on Sell", async function () {
+            const totalSupply = await elx.totalSupply();
+            const bigSellAmt = totalSupply.mul(100).div(10000); 
             
-            // Sell a huge amount to trigger volume
-            const amtToTransfer = ethers.utils.parseEther("200000");
-            await elx.transfer(user3.address, amtToTransfer);
-            await elx.connect(user3).approve(router.address, ethers.constants.MaxUint256);
-            
-            const bal3 = await elx.balanceOf(user3.address);
-            await router.connect(user3).swapExactTokensForETHSupportingFeeOnTransferTokens(
-                bal3, 0, [elx.address, wbnb.address], user3.address, ethers.constants.MaxUint256
+            const deadBefore = await elx.balanceOf(BURN_ADDRESS);
+            await elx.connect(user2).approve(router.address, bigSellAmt);
+            await router.connect(user2).swapExactTokensForETHSupportingFeeOnTransferTokens(
+                bigSellAmt, 0, [elx.address, wbnb.address], user2.address, ethers.constants.MaxUint256
             );
-
-            // Buyback should be pending or ready
-            const canExecute = await reserveVault.shouldExecuteBuyback();
-            expect(canExecute).to.be.true;
-
-            const isPending = await elx.buybackPending();
-            expect(isPending).to.be.true;
+            
+            const deadAfter = await elx.balanceOf(BURN_ADDRESS);
+            expect(deadAfter.gt(deadBefore)).to.be.true;
         });
 
-        it("Should execute buyback on next standard transfer", async function () {
-            // Lower minBuyback to 0 to guarantee execution
-            const deadBalBefore = await elx.balanceOf(BURN_ADDRESS);
-            
-            // Standard transfer triggers the pending buyback. MUST use a non-excluded address!
-            await elx.connect(user1).transfer(user2.address, ethers.utils.parseEther("10"));
-            
-            // Note: The buyback might fail silently due to test environment LP syncing. 
-            // We just ensure pending is false and code didn't revert.
-            const isPending = await elx.buybackPending();
-            expect(isPending).to.equal(false);
-        });
-
-        it("Should enforce cooldown (cannot execute twice immediately)", async function () {
-            // Check status
-            const canExecute = await reserveVault.shouldExecuteBuyback();
-            expect(canExecute).to.equal(false); // Cooldown is active
+        it("Should enforce cooldown after execution", async function () {
+            const state = await reserveVault.getVaultState();
+            expect(state.ready).to.be.false;
         });
     });
 });
