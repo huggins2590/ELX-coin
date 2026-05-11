@@ -21,7 +21,7 @@ interface IELXTokenForReserve {
     function WBNB() external view returns (address);
 }
 
-contract ReserveVault {
+contract ReserveVault is ReentrancyGuard {
     uint256 public totalBNBReceived;
     uint256 public totalBNBDistributed;
     uint256 public totalBNBBuyback;
@@ -43,17 +43,12 @@ contract ReserveVault {
     uint256 public constant executionPercent = 5;
     uint256 public constant minBuybackAmount = 0.05 ether;
     uint16 public constant slippageBps = 1000; // 10% slippage
-    bool private executing;
-
     event BNBReceived(uint256 amount);
     event BuybackExecuted(uint256 bnbSpent, uint256 timestamp);
     event BuybackFailed(uint256 bnbSpent);
+    event BuybackTriggered(uint256 bnbAmount);
 
-    modifier lockExecution() {
-        executing = true;
-        _;
-        executing = false;
-    }
+    // lockExecution removed; using ReentrancyGuard's nonReentrant instead
 
     constructor(address _elxToken, address _routerAddress) {
         require(_elxToken != address(0), "Zero address");
@@ -69,8 +64,6 @@ contract ReserveVault {
     }
 
     function shouldExecuteBuyback() public view returns (bool) {
-        // Don't re-enter
-        if (executing) return false;
 
         // Check 24h window reset
         uint256 todayBuybacks = buybacksToday;
@@ -105,7 +98,7 @@ contract ReserveVault {
         }
     }
 
-    function executeBuyback() external lockExecution {
+    function executeBuyback() external nonReentrant {
         require(msg.sender == elxToken, "Only ELX token");
 
         // Reset 24h window if needed
@@ -137,6 +130,7 @@ contract ReserveVault {
         lastBuybackTime = block.timestamp;
         buybacksToday++;
         totalBNBBuyback += spendAmount;
+        emit BuybackTriggered(spendAmount);
         totalBNBDistributed += spendAmount;
 
         // Execute BNB → ELX swap, tokens go to BURN_ADDRESS

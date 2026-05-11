@@ -97,7 +97,7 @@ contract ELXToken is ERC20, ReentrancyGuard {
     uint256 public constant BUCKET_DURATION = 5 minutes;
     uint256 public constant NUM_BUCKETS = 12;
 
-    uint256 public constant SELL_PRESSURE_THRESHOLD_BPS = 50;
+    uint256 public constant SELL_PRESSURE_THRESHOLD_BPS = 150; // 1.5%
 
     event BuybackBurn(uint256 bnbSpent, uint256 tokensBurned);
     event LiquidityAdded(uint256 tokenAmount, uint256 bnbAmount, uint256 liquidity);
@@ -109,6 +109,7 @@ contract ELXToken is ERC20, ReentrancyGuard {
 
     event SellVolumeUpdated(uint256 totalVolume, uint256 threshold);
     event ReserveBuybackTriggered(uint256 timestamp);
+    event VaultsSet(address indexed reserveVault, address indexed rewardsVault, address indexed pancakePair);
 
     modifier lockTheSwap() {
         swapping = true;
@@ -124,6 +125,7 @@ contract ELXToken is ERC20, ReentrancyGuard {
     constructor(string memory _name, string memory _symbol, address routerAddress, address _devWallet) ERC20(_name, _symbol) {
         _mint(msg.sender, TOTAL_SUPPLY);
         _burn(msg.sender, BURN_AMOUNT);
+         require(routerAddress != address(0) && _devWallet != address(0), "Zero address");
 
         vaultSetter = msg.sender;
         devWallet = _devWallet;
@@ -422,6 +424,7 @@ contract ELXToken is ERC20, ReentrancyGuard {
 
         _isExcludedFromFees[_reserveVault] = true;
         _isExcludedFromFees[_rewardsVault] = true;
+        emit VaultsSet(_reserveVault, _rewardsVault, _pancakePair);
     }
 
     function resetRewardTimer(address account) external {

@@ -3,6 +3,8 @@ pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+
 interface IELXToken is IERC20 {
     function holderSince(address account) external view returns (uint256);
     function resetRewardTimer(address account) external;
@@ -10,7 +12,7 @@ interface IELXToken is IERC20 {
 }
 
 // Vault for holding and distributing ELX rewards to eligible holders
-contract RewardsVault {
+contract RewardsVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
     using SafeERC20 for IELXToken;
     
@@ -49,7 +51,7 @@ contract RewardsVault {
         return currentBalance() / totalEligible;
     }
 
-    function claimReward() external {
+    function claimReward() external nonReentrant {
         require(address(elxToken) != address(0), "Token not set");
         
         uint256 reward = getClaimableAmount(msg.sender);
