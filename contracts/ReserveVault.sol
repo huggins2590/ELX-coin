@@ -21,6 +21,7 @@ interface IELXTokenForReserve {
     function WBNB() external view returns (address);
 }
 
+// Reserve vault: holds BNB and executes controlled ELX buybacks (tokens sent to burn address)
 contract ReserveVault is ReentrancyGuard {
     uint256 public totalBNBReceived;
     uint256 public totalBNBDistributed;
@@ -32,7 +33,7 @@ contract ReserveVault is ReentrancyGuard {
     address public constant BURN_ADDRESS = address(0x000000000000000000000000000000000000dEaD);
     uint256 public constant MIN_RESERVE_BALANCE = 0.01 ether;
 
-    // Buyback execution limits (the "2-4-24" guard)
+    // Frequency and cooldown limits for automated buybacks
     uint256 public lastBuybackTime;
     uint256 public buybacksToday;
     uint256 public dayStartTime;
@@ -48,10 +49,10 @@ contract ReserveVault is ReentrancyGuard {
     event BuybackFailed(uint256 bnbSpent);
     event BuybackTriggered(uint256 bnbAmount);
 
-    // lockExecution removed; using ReentrancyGuard's nonReentrant instead
 
     constructor(address _elxToken, address _routerAddress) {
-        require(_elxToken != address(0), "Zero address");
+        require(_elxToken != address(0) , "Zero address");
+        require(_routerAddress != address(0), "Zero router");
         elxToken = _elxToken;
         pancakeRouter = IUniswapV2Router02(_routerAddress);
         WBNB = IELXTokenForReserve(_elxToken).WBNB();
@@ -92,7 +93,7 @@ contract ReserveVault is ReentrancyGuard {
 
             // Ensure we have at least the minimum amount to spend
             available = _getAvailableBNB();
-            return available >= minBuybackAmount;
+            return available >= minBuybackAmount + MIN_RESERVE_BALANCE;
         } catch {
             return false;
         }

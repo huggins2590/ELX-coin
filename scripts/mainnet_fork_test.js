@@ -12,7 +12,7 @@ async function main() {
     const PANCAKE_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E";
     const DEAD_ADDRESS = "0x000000000000000000000000000000000000dEaD";
     
-    // --- 1. DEPLOYMENT ---
+    // 1) Deploy contracts
     console.log("[1] Deploying Contracts to BSC Mainnet Fork...");
     const ELXToken = await ethers.getContractFactory("ELXToken");
     const token = await ELXToken.deploy("ELX Token", "ELX", PANCAKE_ROUTER, devWallet.address);
@@ -31,7 +31,7 @@ async function main() {
     const factoryAddress = await router.factory();
     const factory = await ethers.getContractAt("contracts/ELXToken.sol:IPancakeSwapV2Factory", factoryAddress);
 
-    // --- 2. INITIAL LIQUIDITY SETUP (40k Market Cap) ---
+    // 2) Initial liquidity (approx $40k)
     console.log("\n[2] Setting up $40k Market Cap Liquidity...");
     const bnbInLP = ethers.utils.parseEther("66.666"); // ~$40,000 at $600/BNB
     const tokensInLP = ethers.utils.parseEther("600000000"); // 600M Circulating Supply
@@ -47,9 +47,9 @@ async function main() {
     await token.setVaults(reserveVault.address, rewardsVault.address, pairAddress);
     console.log(`    ✓ Vaults and Pair linked.`);
 
-    // (Whale will acquire tokens through buying later in the script)
+    // (Whale will buy later)
 
-    // --- STATE TRACKING UTILITIES ---
+    // State tracking utilities
     let lastBurned = ethers.BigNumber.from(0);
     const threshold = (await token.totalSupply()).mul(await token.SELL_PRESSURE_THRESHOLD_BPS()).div(10000);
 
@@ -81,7 +81,7 @@ async function main() {
 
     await getSystemState("INITIAL STATE (POST-LIQUIDITY)");
 
-    // --- 3. RETAIL BUYING ACTIVITY ---
+    // 3) Simulate retail buys
     console.log("\n[3] Simulating Retail Buying (Users entering ecosystem)...");
     console.log("    > User1 buys 0.5 BNB");
     await router.connect(user1).swapExactETHForTokensSupportingFeeOnTransferTokens(
@@ -97,7 +97,7 @@ async function main() {
     );
     await getSystemState("AFTER RETAIL BUYS (TAXES COLLECTED)");
 
-    // --- 4. CONTINUOUS TAX SWAP (AUTOMATED) ---
+    // 4) Trigger tax swap
     console.log("\n[4] Triggering Continuous Tax Swap...");
     console.log("    > The Tax Queue should be over 10,000 ELX now.");
     console.log("    > Next tiny sell will process the tax swap.");
@@ -107,7 +107,7 @@ async function main() {
     );
     await getSystemState("AFTER CONTINUOUS TAX SWAP (RESERVE FUNDED, ELX BURNED)");
 
-    // --- 5. WHALE ACCUMULATION ---
+    // 5) Whale accumulation
     console.log("\n[5] Whale Accumulation (Massive Buy)...");
     console.log("    > Whale buys 10 BNB worth of ELX");
     await router.connect(whale).swapExactETHForTokensSupportingFeeOnTransferTokens(
@@ -115,7 +115,7 @@ async function main() {
     );
     await getSystemState("AFTER WHALE BUY (PRICE SURGE)");
 
-    // --- 6. REGULAR TRANSFER (NO TAX) ---
+    // 6) Regular transfer (no tax)
     console.log("\n[6] Regular Wallet-to-Wallet Transfer...");
     const user1BalBefore = await token.balanceOf(user1.address);
     console.log("    > User1 sends 1,000 ELX to User2");
@@ -124,7 +124,7 @@ async function main() {
     console.log(`    > User1 actually lost: ${format(user1BalBefore.sub(user1BalAfter))} ELX`);
     await getSystemState("AFTER REGULAR TRANSFER (NO TRIGGER CHECK)");
 
-    // --- 7. WHALE DUMP & RESERVE TRIGGER ---
+    // 7) Whale dump to trigger reserve
     console.log("\n[7] Whale Dump (Crossing 0.5% Sell Pressure Threshold)...");
     console.log("    > Whale sells 15,000,000 ELX");
     console.log("    > The Reserve Buyback will be ready after this sell.");
@@ -135,7 +135,7 @@ async function main() {
     );
     await getSystemState("AFTER WHALE DUMP (RESERVE READY)");
 
-    // --- 8. SMART RESERVE EXECUTION ---
+    // 8) Execute reserve buyback
     console.log("\n[8] Executing Smart Reserve Buyback...");
     console.log("    > The next SELL will fire the reserve (Priority #1).");
     await router.connect(user1).swapExactTokensForETHSupportingFeeOnTransferTokens(
@@ -143,7 +143,7 @@ async function main() {
     );
     await getSystemState("AFTER SMART RESERVE EXECUTION (MASSIVE BURN)");
 
-    // --- 9. COOLDOWN PROTECTION ---
+    // 9) Cooldown protection test
     console.log("\n[9] Cooldown Guard Test...");
     console.log("    > Whale immediately tries to dump another 10,000,000 ELX");
     const sellAmount2 = ethers.utils.parseEther("10000000");
@@ -155,7 +155,7 @@ async function main() {
     await token.connect(user1).transfer(user2.address, 100);
     await getSystemState("AFTER 2ND DUMP (IGNORED DUE TO 4-HOUR COOLDOWN)");
 
-    // --- 10. REWARD ELIGIBILITY & FAST FORWARD ---
+    // 10) Reward eligibility and time advance
     console.log("\n[10] Fast-Forwarding 73 Hours for Reward Claims...");
     await ethers.provider.send("evm_increaseTime", [73 * 60 * 60]);
     await ethers.provider.send("evm_mine");

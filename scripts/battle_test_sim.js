@@ -11,7 +11,7 @@ async function main() {
     console.log("       ELX TOKEN - 2,000 TRANSACTION BATTLE TEST");
     console.log("==========================================================\n");
 
-    // 1. Setup DEX Environment
+    // 1) Setup DEX environment (WBNB, Factory, Router)
     const WBNB = await ethers.getContractFactory("WBNB");
     const wbnb = await WBNB.deploy();
     const Factory = await ethers.getContractFactory("PancakeFactory");
@@ -19,24 +19,27 @@ async function main() {
     const Router = await ethers.getContractFactory("PancakeRouter02");
     const router = await Router.deploy(factory.address, wbnb.address);
 
-    // 2. Deploy ELX System
+    // 2) Deploy ELX system and vaults
     const ELXToken = await ethers.getContractFactory("ELXToken");
     const elx = await ELXToken.deploy("ELX Token", "ELX", router.address, devWallet.address);
     const RewardsVault = await ethers.getContractFactory("RewardsVault");
     const rewardsVault = await RewardsVault.deploy(elx.address);
     const ReserveVault = await ethers.getContractFactory("ReserveVault");
     const reserveVault = await ReserveVault.deploy(elx.address, router.address);
-    await elx.setVaults(reserveVault.address, rewardsVault.address);
 
-    // 3. Initial Liquidity (Massive Pool for 2k trades)
+    // 3) Add initial liquidity for stress test
     const tokensInPool = ethers.utils.parseEther("10000000"); // 10M
     const bnbInPool = ethers.utils.parseEther("1000"); // 1000 BNB
     await elx.approve(router.address, tokensInPool);
     await router.addLiquidityETH(elx.address, tokensInPool, 0, 0, deployer.address, 9999999999, { value: bnbInPool });
 
+    // Now that pair exists, set vaults with the actual pair address
+    const pairAddress = await factory.getPair(elx.address, wbnb.address);
+    await elx.setVaults(reserveVault.address, rewardsVault.address, pairAddress);
+
     console.log("✓ System deployed and 1,000 BNB Liquidity added.\n");
 
-    // Listeners for internal events
+    // Event listeners for swaps and distributions
     elx.on("SwapTokensForBNB", (tokens, bnb) => {
         if (bnb.gt(0)) {
             console.log(`\n[EVENT] *** AUTO-TAX SWAP SUCCESS ***`);
@@ -50,7 +53,7 @@ async function main() {
         console.log(`[EVENT] Distribution: Reserve: +${format(bnbToReserve)} BNB | Buyback: +${format(bnbToBuyback)} BNB`);
     });
 
-    // Stress Test Loop
+    // Run stress test loop of randomized trades
     const TOTAL_TX = 2000;
     let successfulTrades = 0;
     let failedTrades = 0;

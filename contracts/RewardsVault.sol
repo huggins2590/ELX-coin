@@ -11,7 +11,7 @@ interface IELXToken is IERC20 {
     function eligibleHoldersCount() external view returns (uint256);
 }
 
-// Vault for holding and distributing ELX rewards to eligible holders
+// Rewards vault: stores ELX rewards and lets eligible holders claim after holding period
 contract RewardsVault is ReentrancyGuard {
     using SafeERC20 for IERC20;
     using SafeERC20 for IELXToken;

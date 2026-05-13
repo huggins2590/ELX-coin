@@ -11,7 +11,7 @@ async function main() {
     console.log("STEP 1: DEPLOYMENT & SETUP");
     console.log("----------------------------------------------------------");
     
-    // Deploy WBNB
+    // Deploy WBNB (mock)
     const WBNB = await ethers.getContractFactory("WBNB");
     const wbnb = await WBNB.deploy();
     await wbnb.deployed();
@@ -27,13 +27,13 @@ async function main() {
     await router.deployed();
     console.log(`✓ Router deployed at: ${router.address}`);
 
-    // Deploy ELX Token
+    // Deploy ELX token
     const ELXToken = await ethers.getContractFactory("ELXToken");
     const testToken = await ELXToken.deploy("ELX Token", "ELX", router.address, devWallet.address);
     await testToken.deployed();
     console.log(`✓ ELX Token deployed at: ${testToken.address}`);
 
-    // Deploy Vaults
+    // Deploy vaults
     const RewardsVault = await ethers.getContractFactory("RewardsVault");
     const rewardsVault = await RewardsVault.deploy(testToken.address);
     await rewardsVault.deployed();
@@ -44,13 +44,13 @@ async function main() {
     await reserveVault.deployed();
     console.log(`✓ Reserve Vault deployed at: ${reserveVault.address}`);
 
-    // Setup Pair & Link Vaults (3-argument setVaults)
+    // Setup pair & link vaults
     await factory.createPair(testToken.address, wbnb.address);
     const pairAddress = await factory.getPair(testToken.address, wbnb.address);
     await testToken.setVaults(reserveVault.address, rewardsVault.address, pairAddress);
     console.log(`✓ Vaults & Pair linked to token contract.`);
 
-    // Add Liquidity (1M ELX + 100 BNB)
+    // Add initial liquidity (1M ELX + 100 BNB)
     const tokensToAdd = ethers.utils.parseEther("1000000");
     const bnbToAdd = ethers.utils.parseEther("100");
     await testToken.approve(router.address, tokensToAdd);
@@ -69,7 +69,7 @@ async function main() {
     console.log("==========================================================");
     console.log("STEP 2: TRADING & TAX DISTRIBUTION");
     console.log("==========================================================");
-    console.log("Scenario: User buys tokens. Tax is collected and immediately processed on the next Sell.");
+    console.log("Scenario: user buys -> tax accumulates; next sell processes distribution.");
     
     // User1 Buys 30 BNB worth
     await router.connect(buyer1).swapExactETHForTokensSupportingFeeOnTransferTokens(0, [wbnb.address, testToken.address], buyer1.address, ethers.constants.MaxUint256, {value: ethers.utils.parseEther("30")});
@@ -90,7 +90,7 @@ async function main() {
     console.log("\n==========================================================");
     console.log("STEP 3: SMART RESERVE BUYBACK (PRICE SUPPORT)");
     console.log("==========================================================");
-    console.log("Scenario: Heavy sell pressure is detected. System fires an ATOMIC buyback + burn.");
+    console.log("Scenario: heavy sell pressure triggers atomic buyback + burn.");
 
     // Fund Reserve Vault manually for demo
     await deployer.sendTransaction({ to: reserveVault.address, value: ethers.utils.parseEther("10") });

@@ -39,7 +39,7 @@ interface IReserveVault {
     function executeBuyback() external;
 }
 
-// ELX Token: A deflationary token with automated tax distribution, buybacks, and rewards
+// ELX token with tax distribution, buybacks, liquidity and rewards handling
 contract ELXToken is ERC20, ReentrancyGuard {
     uint256 public constant TOTAL_SUPPLY = 1_000_000_000 * 10 ** 18;
     uint256 public constant BURN_AMOUNT = 400_000_000 * 10 ** 18;
@@ -48,13 +48,13 @@ contract ELXToken is ERC20, ReentrancyGuard {
     uint256 public constant buyTaxPercent = 5;
     uint256 public constant sellTaxPercent = 5;
 
-    // Basis Points (BPS) Math: 10,000 BPS = 100% | 100 BPS = 1%
-    // Layer 1: How the total 5% tax is split (Sum = 500 BPS / 5.0%)
+    // BPS: 10,000 = 100%.
+    // Layer 1: Split of the total tax (5% => 500 BPS)
     uint256 public constant TAX_SHARE_DEV_BPS = 30;      // 0.3% of total transaction
     uint256 public constant TAX_SHARE_RESERVE_BPS = 30;  // 0.3% of total transaction
     uint256 public constant TAX_SHARE_BUYBACK_BPS = 440; // 4.4% of total transaction
 
-    // Layer 2: How the 4.4% Buyback portion is distributed (Sum = 10,000 BPS / 100% of the portion)
+    // Layer 2: Distribution of the buyback portion (10000 = 100%)
     uint256 public constant DISTRIBUTION_LIQUIDITY_BPS = 4500; // 45.0% of the buyback portion
     uint256 public constant DISTRIBUTION_BURN_BPS = 4850;      // 48.5% of the buyback portion
     uint256 public constant DISTRIBUTION_REWARDS_BPS = 650;    // 6.5% of the buyback portion
@@ -72,6 +72,7 @@ contract ELXToken is ERC20, ReentrancyGuard {
     address public immutable WBNB;
     uint16 public constant slippageBps = 1000; 
 
+    // Swap guard
     bool private swapping;
     address public immutable vaultSetter;
     mapping(address => bool) public _isExcludedFromFees;
@@ -80,7 +81,7 @@ contract ELXToken is ERC20, ReentrancyGuard {
     uint256 public totalBNBToBuyback;
     uint256 public pendingBuybackBNB;
 
-    // Track status of internal functions
+    // Flags indicating last swap/buyback/liquidity outcomes
     bool public lastRewardsFailed;
     bool public lastBuybackFailed;
     bool public lastLiquidityFailed;
@@ -90,14 +91,14 @@ contract ELXToken is ERC20, ReentrancyGuard {
     uint256 public constant REWARD_THRESHOLD = 50000 * 10**18;
     uint256 public eligibleHoldersCount;
 
-    // Sell volume tracking: 12 buckets x 5 minutes = 60-minute window
+    // Sell volume tracking: 12 x 5-minute buckets (~60 minutes)
     uint256[12] public sellBuckets;
     uint256 public currentBucketIndex;
     uint256 public currentBucketStart;
     uint256 public constant BUCKET_DURATION = 5 minutes;
     uint256 public constant NUM_BUCKETS = 12;
 
-    uint256 public constant SELL_PRESSURE_THRESHOLD_BPS = 150; // 1.5%
+    uint256 public constant SELL_PRESSURE_THRESHOLD_BPS = 150; // 1.5% threshold for reserve buyback
 
     event BuybackBurn(uint256 bnbSpent, uint256 tokensBurned);
     event LiquidityAdded(uint256 tokenAmount, uint256 bnbAmount, uint256 liquidity);
@@ -131,8 +132,6 @@ contract ELXToken is ERC20, ReentrancyGuard {
         devWallet = _devWallet;
         pancakeRouter = IUniswapV2Router02(routerAddress);
         WBNB = pancakeRouter.WETH();
-
-
         _isExcludedFromFees[msg.sender] = true;
         _isExcludedFromFees[address(this)] = true;
     }
@@ -178,9 +177,7 @@ contract ELXToken is ERC20, ReentrancyGuard {
             _recordSellVolume(amount);
         }
 
-        // Either-Or Priority Logic: Handle "Pancake: LOCKED" by deferring buybacks during trades
-        // Priority Logic: Handle system actions only during SELLS to avoid Pancake: LOCKED
-        // We prioritize Reserve Buyback (Price Support) over Tax Swaps
+            // Priority: on sells, try reserve buyback first; otherwise swap taxes when threshold reached.
         if (!swapping && to == pancakePair && pancakePair != address(0)) {
             if (_isReserveBuybackReady()) {
                 _executeReserveBuyback();
@@ -227,7 +224,9 @@ contract ELXToken is ERC20, ReentrancyGuard {
         path[1] = WBNB;
 
         uint256 initialBalance = address(this).balance;
-        lastRewardsFailed = false; lastBuybackFailed = false; lastLiquidityFailed = false;
+        lastRewardsFailed = false; 
+        lastBuybackFailed = false; 
+        lastLiquidityFailed = false;
 
 
         uint256 totalTaxBps = TAX_SHARE_RESERVE_BPS + TAX_SHARE_BUYBACK_BPS; 

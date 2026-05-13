@@ -1,4 +1,4 @@
-require("@nomiclabs/hardhat-ethers");
+require("@nomiclabs/hardhat-waffle");
 require("dotenv").config();
 
 module.exports = {
@@ -26,8 +26,8 @@ module.exports = {
     hardhat: {
       chainId: 56,
       forking: {
-        url: "https://bnb-mainnet.g.alchemy.com/v2/-vZfyfKHGZLn5DuF_Uqu4",
-        enabled: process.env.FORK === "true"
+        url: "https://bnb-mainnet.g.alchemy.com/v2/",
+        enabled: false
       }
     },
     localhost: {
